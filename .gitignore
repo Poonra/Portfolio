@@ -1,0 +1,20 @@
+cat > .gitignore << 'EOF'
+# Rust
+/target
+**/*.rs.bk
+
+# Editors/OS
+.DS_Store
+Thumbs.db
+.vscode/
+.idea/
+
+# Env & local db files (we may use SQLite first)
+.env
+*.db
+*.sqlite
+*.sqlite3
+
+# Logs
+*.log
+EOF
