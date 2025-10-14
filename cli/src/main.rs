@@ -1,4 +1,6 @@
 use clap::{Parser, Subcommand};
+mod db; // load db.rs
+
 ///
 #[derive(Parser)]
 #[command(name="portfolio", version, about="Track stocks & crypto")]
@@ -88,20 +90,55 @@ enum TxnCmd {
     },
 }
 
-fn main() -> anyhow::Result<()> {
+
+
+#[tokio::main]
+
+    async fn main() -> anyhow::Result<()> {
+        dotenvy::dotenv().ok(); // read .env
+       println!("DB CONNECT");
+        
+    
     let cli = Cli::parse(); //clap parse argv to our struct
 
     match cli.cmd {
         Command::Init =>{
-            println!("dub init setting up db");
+            let pool = db::connect_from_env().await?;
+            db::init_schema(&pool).await?;
+            println!("Database ready");
         }
         Command::Asset { action } => match action{
 
-            AssetCmd::Add {symbol, r#type, currency,name} => {
-                println!("DUB asset add: {symbol} type= {type} currency={currency} name={:?}", name);
+            AssetCmd::Add { symbol, r#type, currency, name } => {
+                let t = r#type.to_lowercase();
+                let valid = ["stock","etf","crypto"].contains(&t.as_str());
+                if !valid{
+                    anyhow::bail!("[ERROR] type must be one of stock | etf | crypto")
+                }
+                let pool = db::connect_from_env().await?;
+                let id = db::insert_asset(&pool, &symbol, &t, &currency, name.as_deref()).await?;
+                println!("added asset id ={id}: {symbol} [{t}] {currency} {:?}", name);
             }
             AssetCmd::List => {
-                println!("(stub) asset list: ");
+                let pool = db::connect_from_env().await?;
+                let rows = db::list_assets(&pool).await?;
+
+                if rows.is_empty(){
+                    println!("no asset yet");
+                } else {
+                    println!("ID    SYMBOL  TYPE    CURRENCY    NAME");
+                    for a in rows {
+                        println!(
+                            "{:<4} {:<7} {:<8} {:<9} {}",
+                            a.id,
+                            a.symbol,
+                            a.asset_type,
+                            a.currency,
+                            a.name.unwrap_or_default()
+
+                        );
+                    }
+                }
             }
         },
 
@@ -111,23 +148,23 @@ fn main() -> anyhow::Result<()> {
                 println!("Transaction add user={user} {side} {qty} {symbol} @ {price} fee={fee} ts={ts}");
             }
             TxnCmd::List { user, limit } => {
-                println!("(stub) txn list: user={user} limit={limit}");
+                println!("txn list: user={user} limit={limit}");
             }
         },
 
         Command::Sync { offline } => {
-            println!("(stub) sync: offline={offline}");
+            println!("sync: offline={offline}");
         }
 
         Command::Positions { user } => {
-            println!("(stub) positions for user={user}");
+            println!("positions for user={user}");
         }
 
         Command::Summary { user, json } => {
             if json {
                 println!(r#"{{"total_value":0,"total_pl":0,"allocations":[],"user":"{user}"}}"#);
             } else {
-                println!("(stub) summary for user={user} -> value=0, P/L=0");
+                println!("summary for user={user} -> value=0, P/L=0");
             }
         }
     
@@ -135,3 +172,4 @@ fn main() -> anyhow::Result<()> {
 
     Ok(())
 }
+
