@@ -1,6 +1,8 @@
 use clap::{Parser, Subcommand};
 mod db; // load db.rs
 
+
+
 ///
 #[derive(Parser)]
 #[command(name="portfolio", version, about="Track stocks & crypto")]
@@ -97,6 +99,10 @@ enum TxnCmd {
     async fn main() -> anyhow::Result<()> {
         dotenvy::dotenv().ok(); // read .env
        println!("DB CONNECT");
+       dotenvy::from_filename(".env")?;            // <- not .ok(); bubble error if missing
+eprintln!("CWD = {}", std::env::current_dir()?.display());
+eprintln!("DATABASE_URL = {:?}", std::env::var("DATABASE_URL"));
+
         
     
     let cli = Cli::parse(); //clap parse argv to our struct
@@ -145,11 +151,27 @@ enum TxnCmd {
         Command::Txn{action}=> match action{
 
             TxnCmd::Add { user, symbol, side, qty, price, fee, ts } =>{
-                println!("Transaction add user={user} {side} {qty} {symbol} @ {price} fee={fee} ts={ts}");
+                let pool = db::connect_from_env().await?;
+                db::init_schema(&pool).await?;
+
+                let id = db::insert_txn(&pool, &user, &symbol, &side, qty, price, fee, &ts, None).await?;
+                println!("added txn id={id}: {user} {side} {qty} {symbol} @ {price} fee={fee} ts={ts}");
             }
             TxnCmd::List { user, limit } => {
-                println!("txn list: user={user} limit={limit}");
+                let pool = db::connect_from_env().await?;
+        let rows = db::list_txns(&pool, &user, limit).await?;
+        if rows.is_empty() {
+            println!("(no transactions yet)");
+        } else {
+            println!("ID   TS                        USER  SYMBOL  SIDE       QTY       PRICE      FEE   NOTE");
+            for t in rows {
+                println!("{:<4} {:<24} {:<5} {:<6} {:<10} {:>9.4} {:>10.4} {:>6.2} {}",
+                    t.id, t.ts, t.user, t.symbol, t.side, t.qty, t.price, t.fee, t.note.unwrap_or_default()
+                );
             }
+        }
+    }
+            
         },
 
         Command::Sync { offline } => {

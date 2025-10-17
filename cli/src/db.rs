@@ -29,6 +29,23 @@ pub async fn init_schema(pool: &Db) -> anyhow::Result<()> {
     );
     "#).execute(pool).await?;
 
+    sqlx::query(
+    r#"
+    CREATE TABLE IF NOT EXISTS transactions (
+        id        INTEGER PRIMARY KEY AUTOINCREMENT,
+        user      TEXT    NOT NULL,
+        asset_id  INTEGER NOT NULL REFERENCES assets(id) ON DELETE RESTRICT,
+        side      TEXT    NOT NULL CHECK (side IN ('buy','sell','dividend','deposit','withdrawal')),
+        qty       REAL    NOT NULL,
+        price     REAL    NOT NULL,
+        fee       REAL    NOT NULL DEFAULT 0,
+        ts        TEXT    NOT NULL,   -- ISO 8601 (UTC)
+        note      TEXT
+    );
+    CREATE INDEX IF NOT EXISTS idx_txn_user_ts ON transactions(user, ts DESC);
+    "#
+).execute(pool).await?;
+
 
     Ok(())
     
@@ -91,3 +108,106 @@ pub async fn list_assets(pool:&Db) -> anyhow::Result<Vec<AssetRow>> {
     })
     .collect())
 }
+
+pub async fn find_asset_id_by_symbol(pool: &Db, symbol: &str) -> anyhow::Result<i64>{
+    let rows = sqlx::query(
+        r#"SELECT id FROM assets WHERE symbol = ?1"#
+    )
+    .bind(symbol)
+    .fetch_all(pool)
+    .await?;
+
+        match rows.len() {
+        1 => Ok(rows[0].get::<i64, _>("id")),
+        0 => anyhow::bail!("asset '{symbol}' not found (add it first with `asset add`)"),
+        _ => anyhow::bail!("symbol '{symbol}' is ambiguous (multiple asset types)"),
+    }
+
+
+}
+
+pub async fn insert_txn(
+    pool: &Db,
+    user:&str,
+    symbol:&str,
+    side: &str,
+    qty:f64,
+    price:f64,
+    fee:f64,
+    ts:&str,
+    note: Option<&str>,
+) -> anyhow::Result<i64>{
+
+    let s =side.to_lowercase();
+    let ok =["buy","sell","dividend","deposit","withdrawal"].contains(&s.as_str());
+    if !ok { anyhow::bail!("side must be one of: buy|sell|dividend|deposit|withdrawal"); }
+    if qty <= 0.0 { anyhow::bail!("qty must be > 0"); }
+    if price < 0.0 || fee < 0.0 { anyhow::bail!("price/fee must be >= 0"); }
+
+    let asset_id = find_asset_id_by_symbol(pool, symbol).await?;
+
+    let res = sqlx::query(
+        r#"
+            INSERT INTO transactions (user, asset_id,side,qty,price,fee,ts,note)
+            VALUES(?,?,?,?,?,?,?,?)
+            "#
+    )
+    .bind(user)
+    .bind(asset_id)
+    .bind(s)
+    .bind(qty)
+    .bind(price)
+    .bind(fee)
+    .bind(ts)
+    .bind(note)
+    .execute(pool)
+    .await?;
+
+    Ok(res.last_insert_rowid())
+}
+
+#[derive(Debug)]
+pub struct TxnRow{
+    pub id: i64,
+    pub ts: String,
+    pub user: String,
+    pub symbol: String,
+    pub side: String,
+    pub qty: f64,
+    pub price: f64,
+    pub fee: f64,
+    pub note: Option<String>,
+}
+
+pub async fn list_txns(pool: &Db, user: &str,limit:usize) -> anyhow::Result<Vec<TxnRow>>{
+    let rows = sqlx::query(
+        r#"
+        SELECT t.id, t.ts, t.user, a.symbol, t.side, t.qty, t.price, t.fee, t.note
+        FROM transactions t
+        JOIN assets a ON a.id = t.asset_id
+        WHERE t.user = ?1
+        ORDER BY t.ts DESC
+        LIMIT ?2
+        "#
+    )
+    .bind(user)
+    .bind(limit as i64)
+    .fetch_all(pool)
+    .await?;
+
+
+    Ok(rows.into_iter().map(|r| TxnRow {
+        id:    r.get("id"),
+        ts:    r.get("ts"),
+        user:  r.get("user"),
+        symbol:r.get("symbol"),
+        side:  r.get("side"),
+        qty:   r.get("qty"),
+        price: r.get("price"),
+        fee:   r.get("fee"),
+        note:  r.try_get("note").ok(),
+    }).collect())
+
+}
+
+
