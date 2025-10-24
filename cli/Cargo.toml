@@ -7,6 +7,7 @@ edition = "2024"
 anyhow = "1.0.100"
 chrono = { version = "0.4.42", features = ["serde"] }
 clap = { version = "4.4", features = ["derive"] }
+csv = "1.4.0"
 dotenvy = "0.15.7"
 serde = "1.0.228"
 sqlx = { version = "0.8.6", features = ["runtime-tokio", "macros", "sqlite", "chrono"] }

@@ -97,9 +97,9 @@ enum TxnCmd {
 #[tokio::main]
 
     async fn main() -> anyhow::Result<()> {
-        dotenvy::dotenv().ok(); // read .env
+    dotenvy::dotenv().ok(); // read .env
        println!("DB CONNECT");
-       dotenvy::from_filename(".env")?;            // <- not .ok(); bubble error if missing
+
 eprintln!("CWD = {}", std::env::current_dir()?.display());
 eprintln!("DATABASE_URL = {:?}", std::env::var("DATABASE_URL"));
 
@@ -112,7 +112,7 @@ eprintln!("DATABASE_URL = {:?}", std::env::var("DATABASE_URL"));
             let pool = db::connect_from_env().await?;
             db::init_schema(&pool).await?;
             println!("Database ready");
-        }
+        },
         Command::Asset { action } => match action{
 
             AssetCmd::Add { symbol, r#type, currency, name } => {
@@ -150,9 +150,16 @@ eprintln!("DATABASE_URL = {:?}", std::env::var("DATABASE_URL"));
 
         Command::Txn{action}=> match action{
 
+
             TxnCmd::Add { user, symbol, side, qty, price, fee, ts } =>{
                 let pool = db::connect_from_env().await?;
                 db::init_schema(&pool).await?;
+                let s = side.to_lowercase();
+                let valid_sides = ["buy","sell","dividend","deposit","withdrawal"];
+                if !valid_sides.contains(&s.as_str()) {
+                    anyhow::bail!("[ERROR] side must be one of buy | sell | dividend | deposit | withdrawal");
+                }
+
 
                 let id = db::insert_txn(&pool, &user, &symbol, &side, qty, price, fee, &ts, None).await?;
                 println!("added txn id={id}: {user} {side} {qty} {symbol} @ {price} fee={fee} ts={ts}");
@@ -171,16 +178,39 @@ eprintln!("DATABASE_URL = {:?}", std::env::var("DATABASE_URL"));
             }
         }
     }
-            
+
         },
 
         Command::Sync { offline } => {
+            let pool = db::connect_from_env().await?;
+            db::upsert_price(&pool, "AAPL".parse()?, "2025-01-01T00:00:00Z", 199.99,"idk").await?;
             println!("sync: offline={offline}");
-        }
+        },
 
         Command::Positions { user } => {
-            println!("positions for user={user}");
-        }
+            let pool = db::connect_from_env().await?;
+            db::init_schema(&pool).await?;
+            let rows = db::compute_position(&pool, &user).await?;
+
+            if rows.is_empty() {
+                println!("no positions yet");
+            } else {
+                println!("SYMBOL    TYPE    QTY     AVG_COST    LAST_PRICE  MKT_VALUE UNRL_P/L  CUR");
+                let mut tv = 0.0f64;
+                let mut tpl = 0.0f64;
+                for p in rows {
+                    println!("{:<6} {:<7} {:>9.4} {:>10.4} {:>11.4} {:>10.2} {:>9.2} {:<3}",
+                             p.symbol, p.asset_type, p.net_qty, p.avg_cost,
+                             p.last_price.unwrap_or(0.0), p.market_value, p.unrealized_pl, p.currency
+                    );
+                    tv += p.market_value;
+                    tpl += p.unrealized_pl;
+
+                }
+                println!("-----------------------------------------------------------------------------------------");
+                println!("Total value={:.2}     P/L ={:.2}",tv,tpl);
+            }
+        },
 
         Command::Summary { user, json } => {
             if json {

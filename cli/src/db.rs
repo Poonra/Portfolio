@@ -1,6 +1,9 @@
 use sqlx::{Sqlite, Pool};
 use sqlx::sqlite::SqlitePoolOptions;
 use sqlx::Row;
+use std::collections::HashMap;
+
+
 
 pub type Db = Pool<Sqlite>;
 
@@ -45,6 +48,19 @@ pub async fn init_schema(pool: &Db) -> anyhow::Result<()> {
     CREATE INDEX IF NOT EXISTS idx_txn_user_ts ON transactions(user, ts DESC);
     "#
 ).execute(pool).await?;
+
+    sqlx::query(
+        r#"
+    CREATE TABLE IF NOT EXISTS prices (
+        asset_id INTERGER NOT NULL REFERENCES assets(id) ON DELETE CASCADE,
+        date    TEXT    NOT NULL,
+        close   REAL    NOT NULL,
+        source  TEXT    NOT NULL,
+        PRIMARY KEY (asset_id,date)
+    );
+
+    "#
+    ).execute(pool).await?;
 
 
     Ok(())
@@ -210,4 +226,144 @@ pub async fn list_txns(pool: &Db, user: &str,limit:usize) -> anyhow::Result<Vec<
 
 }
 
+pub async fn upsert_price(
+    pool: &Db,
+    asset_id:i64,
+    date: &str,
+    close:f64,
+    source:&str,
+) -> anyhow::Result<()>{
+    sqlx::query(
+        r#"
+                INSERT INTO price (asset_id,date, close, source)
+                VALUES(?,?,?,?)
+                ON CONFLICT(asset_id,date)
+                DO UPDATE SET close= excluded.close,source=excluded.source
+                "#
+    )
+    .bind(asset_id)
+    .bind(date)
+    .bind(close)
+    .bind(source)
+        .execute(pool)
+        .await?;
+    Ok(())
+}
 
+pub async fn lastest_price(pool: &Db, asset_id: i64,) -> anyhow::Result<Option<(String,f64)>>{
+    let row = sqlx::query(
+        r#"
+             SELECT date,close
+             from prices
+             WHERE asset_id = ?
+             ORDER BY date DESC
+             LIMIT 1
+             "#
+    )
+        .bind(asset_id)
+        .fetch_optional(pool)
+        .await?;
+
+    Ok(row.map(|r|{
+        let date: String = r.get("date");
+        let close: f64 = r.get("close");
+        (date,close)
+
+    }))
+}
+
+
+#[derive(Debug)]
+pub struct Position {
+    #[allow(dead_code)]
+    pub asset_id: i64,
+    pub symbol: String,
+    pub asset_type: String,
+    pub currency: String,
+    pub net_qty: f64,
+    pub avg_cost: f64,
+    pub last_price: Option<f64>,
+    pub market_value: f64,
+    pub unrealized_pl: f64,
+}
+
+// get avg cost
+// buy add qtt +fee sell reduce nur qtt
+
+pub async fn compute_position(pool: &Db, user:&str) -> anyhow::Result<Vec<Position>>{
+
+        let txns = sqlx::query(
+            r#"
+                SELECT a.id as asset_id, a.symbol, a.asset_type, a.currency,
+                t.side, t.qty, t.price, t.fee
+                FROM transactions t
+                JOIN assets a ON a.id = t.asset_id
+                WHERE t.user = ?
+                ORDER BY t.ts ASC
+                "#
+        )
+
+            .bind(user)
+            .fetch_all(pool)
+            .await?;
+
+        struct  Acc{
+            symbol: String, asset_type:String, currency: String,
+            buy_qty:f64, buy_cost:f64, sell_qty:f64,
+        }
+
+        let mut map: HashMap<i64, Acc> =  HashMap::new();
+
+        for r in txns{
+            let id: i64 = r.get("asset_id");
+            let entry = map.entry(id).or_insert_with(|| Acc {
+                symbol:   r.get("symbol"),
+                asset_type: r.get("asset_type"),
+                currency: r.get("currency"),
+                buy_qty: 0.0, buy_cost: 0.0, sell_qty: 0.0,
+            });
+            let side: String = r.get("side");
+            let qty:  f64 = r.get("qty");
+            let price:f64 = r.get("price");
+            let fee:  f64 = r.get("fee");
+
+            match side.as_str(){
+                "buy" => {entry.buy_qty += qty; entry.buy_cost += qty*price + fee;}
+                "sell" => {entry.sell_qty += qty;}
+                _=> {} // dividend/deposit/withdraw ignore cost + qty
+            }
+        }
+
+    let mut out = Vec::new();
+    for (asset_id,acc) in map{
+        let net_qty =acc.buy_qty-acc.sell_qty;
+        if net_qty.abs() < f64::EPSILON{
+            continue;
+
+        }
+        let avg_cost = if acc.buy_qty >0.0 { acc.buy_cost/ acc.buy_qty} else{0.0};
+
+        //lp = lastprice
+        let lp = lastest_price(pool,asset_id).await?;
+        let last_price = lp .as_ref().map(|(_,p)| *p);
+        let market_value =last_price.unwrap_or(0.0) * net_qty.max(0.0);
+        let unrealized_pl = match last_price{
+            Some(p) => net_qty * (p - avg_cost),
+            None => 0.0,
+        };
+
+        out.push(Position {
+            asset_id,
+            symbol: acc.symbol,
+            asset_type: acc.asset_type,
+            currency: acc.currency,
+            net_qty,
+            avg_cost,
+            last_price,
+            market_value,
+            unrealized_pl,
+        });
+    }
+    out.sort_by(|a,b| a.symbol.cmp(&b.symbol));
+    Ok(out)
+}
